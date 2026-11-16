@@ -165,9 +165,9 @@
   }
 
   // How the Page's comments are handled. Literal keys so the i18n test can see every one of them.
-  var CMT_TEXT = { off: "msc.cmt_off", inbox: "msc.cmt_inbox", reply: "msc.cmt_reply" };
+  var CMT_TEXT = { off: "msc.cmt_off", inbox: "msc.cmt_inbox", reply: "msc.cmt_reply", private: "msc.cmt_private" };
   function commentSelect(value, attr) {
-    return '<select class="js-input msc-cmt" ' + attr + '="1">' + ["inbox", "reply", "off"].map(function (k) {
+    return '<select class="js-input msc-cmt" ' + attr + '="1">' + ["inbox", "reply", "private", "off"].map(function (k) {
       return '<option value="' + k + '"' + (k === value ? " selected" : "") + ">" + esc(tw(CMT_TEXT[k])) + "</option>";
     }).join("") + "</select>";
   }

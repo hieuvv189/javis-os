@@ -6330,6 +6330,7 @@
   "msc.cmt_saved": "Comment handling saved.",
   "msc.cmt_reply": "The bot replies publicly",
   "msc.cmt_inbox": "Show in the inbox, you reply",
+  "msc.cmt_private": "The bot sends the commenter one private message (Facebook)",
   "msc.cmt_off": "Off, ignore comments",
   "msc.cmt_how": "Every top-level comment under a post becomes a conversation in the inbox, and the replies under it join that conversation. What Javis sends shows publicly right under the top-level comment. Needs pages_read_user_content and pages_manage_engagement (Log in with Facebook asks for both).",
   "msc.cmt_label": "Page comments",
