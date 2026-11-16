@@ -31,7 +31,9 @@ whatever Javis sends there goes out as a reply under that top-level comment. The
 is `cmt:<top-level comment id>`, so a reply needs no stored state and still works after a
 restart. They arrive as `feed` changes on the same webhook. Each account picks a mode in its
 meta (`comments`): "off", "inbox" (shown in the inbox, the owner answers; the default) or
-"reply" (the bot answers them too, publicly).
+"reply" (the bot answers them too, publicly) or "private" (Facebook only: the bot sends the commenter ONE
+private Messenger message through Meta's Private Replies instead of answering in public; see
+`_private_comment`). The mode is per Page, so other Pages keep whatever they had.
 
 Instagram (0.447.0), through the same Page connection: the Instagram professional account linked to the Page
 sends its direct messages and comments to the same webhook as `object: "instagram"`, keyed by the Instagram
@@ -77,11 +79,15 @@ IG_COMMENT_PREFIX = "igc:"    # Instagram comment thread: igc:<top-level comment
 IG_OBJECT = "instagram"
 IG_COMMENT_FIELD = "comments"
 IG_WEBHOOK_FIELDS = "messages,messaging_postbacks,comments"
-COMMENT_MODES = ("off", "inbox", "reply")
+COMMENT_MODES = ("off", "inbox", "reply", "private")
 COMMENT_MODE_DEFAULT = "inbox"
 MAX_COMMENT = 7900            # a comment takes 8000 characters
 NAME_RETRY_S = 600            # a sender whose name lookup failed is looked up again after 10 minutes, not per message
 MAX_NAMES = 2000
+
+PRIVATE_STORE_NAME = "messenger_private_replies.json"
+MAX_PRIVATE_KEEP = 20000      # comment records kept in the private-reply ledger
+PRIVATE_WAIT_S = 7 * 86400    # a commenter who never answered is not messaged again for 7 days
 
 # page_id -> MessengerBot currently running for it.
 _REGISTRY: dict = {}
@@ -246,6 +252,96 @@ def comment_mode(account_id: str) -> str:
     except Exception:
         m = ""
     return m if m in COMMENT_MODES else COMMENT_MODE_DEFAULT
+
+
+def private_note(post: str = "") -> str:
+    """What the model is told before writing the one private message to a commenter. Model prompt, Vietnamese only."""
+    post = str(post or "").strip()
+    return ("[Khách vừa BÌNH LUẬN dưới một bài viết của Fanpage" + (f' (bài viết: "{post[:300]}")' if post else "")
+            + ". Câu trả lời của bạn được gửi thành MỘT tin nhắn RIÊNG qua Messenger tới người bình luận, không hiện "
+              "công khai. Chỉ được gửi đúng một tin, khách chưa trả lời thì không nhắn tiếp: viết ngắn gọn, bám đúng "
+              "điều khách hỏi trong bình luận, chào và mời khách nhắn lại để được tư vấn tiếp. Không tự suy khách là "
+              "shop hay nhà phân phối; chưa rõ thì hỏi một câu ngắn.]")
+
+
+# ---- Private-reply ledger (persists across restarts and webhook retries) ----------------
+_PRIVATE_LOCK = None
+
+
+def _private_path() -> Path:
+    base = os.environ.get("JAVIS_STATE_DIR") or str(Path(__file__).parent)
+    return Path(base) / PRIVATE_STORE_NAME
+
+
+def _private_load() -> dict:
+    try:
+        d = json.loads(_private_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            d.setdefault("comments", {})
+            d.setdefault("waiting", {})
+            return d
+    except Exception:
+        pass
+    return {"comments": {}, "waiting": {}}
+
+
+def _private_save(d: dict) -> None:
+    c = d.get("comments") or {}
+    if len(c) > MAX_PRIVATE_KEEP:
+        keep = sorted(c.items(), key=lambda kv: kv[1].get("at", 0))[-MAX_PRIVATE_KEEP:]
+        d["comments"] = dict(keep)
+    p = _private_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def private_record(page_id: str, comment_id: str) -> dict:
+    """The ledger entry for one comment: {} when never handled, else {"status", "at", "error"?, ...}."""
+    return dict((_private_load().get("comments") or {}).get(f"{page_id}:{comment_id}") or {})
+
+
+def private_claim(page_id: str, comment_id: str, from_id: str) -> str:
+    """Claim a comment for a private reply BEFORE anything is sent, written to disk.
+
+    Returns "" when this caller may send, else why not: "duplicate" (this comment id was already
+    claimed, by a webhook retry or before a restart) or "waiting" (this person already got a private
+    reply and has not answered yet). A claim that crashes mid-send stays "pending" and is never
+    retried: one missed message is better than two."""
+    d = _private_load()
+    key = f"{page_id}:{comment_id}"
+    if key in d["comments"]:
+        return "duplicate"
+    now = time.time()
+    w = d["waiting"].get(f"{page_id}:{from_id}") if from_id else None
+    if w and now - float(w) < PRIVATE_WAIT_S:
+        d["comments"][key] = {"status": "skipped", "reason": "waiting", "at": now}
+        _private_save(d)
+        return "waiting"
+    d["comments"][key] = {"status": "pending", "at": now, "from_id": from_id}
+    _private_save(d)
+    return ""
+
+
+def private_finish(page_id: str, comment_id: str, from_id: str, result: dict) -> None:
+    """Write the outcome of a claimed comment: "sent", "failed" (with Meta's error) or "skipped"."""
+    d = _private_load()
+    key = f"{page_id}:{comment_id}"
+    rec = dict(d["comments"].get(key) or {})
+    rec.update(result)
+    rec["at"] = time.time()
+    d["comments"][key] = rec
+    if rec.get("status") == "sent" and from_id:
+        d["waiting"][f"{page_id}:{from_id}"] = rec["at"]
+    _private_save(d)
+
+
+def private_answered(page_id: str, sender_id: str) -> None:
+    """The person wrote to the Page in Messenger: the next comment of theirs may get a private reply again."""
+    d = _private_load()
+    if d["waiting"].pop(f"{page_id}:{sender_id}", None) is not None:
+        _private_save(d)
 
 
 def instagram_of(account_id: str) -> dict:
@@ -681,6 +777,11 @@ class MessengerBot(HangLuot):
         if instagram and not instagram_of(self.account_id).get("on"):
             return
         chat = (IG_PREFIX + sender) if instagram else sender
+        if not instagram:
+            try:
+                private_answered(self.page_id, sender)
+            except Exception as e:
+                print(f"[messenger private] {type(e).__name__}: {e}", file=sys.stderr)
         self.last_inbound = time.time()
         client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(60.0))
         self._client = client
@@ -768,12 +869,64 @@ class MessengerBot(HangLuot):
         }
         if ig:
             meta["instagram"] = True
-        if mode == "inbox":
+        if mode == "private" and not ig:
+            await self._private_comment(com, text, meta, post)
+            return
+        if mode in ("inbox", "private"):
             # Shown in the inbox only: the answer function records the comment and stays silent.
             meta["log_only"] = True
             await self.answer_fn(text, meta, None)
             return
         await self._dispatch(client, chat, text, meta)
+
+    async def _private_comment(self, com, text, meta, post):
+        """Private mode: one private Messenger message per top-level comment, never a public reply.
+
+        Replies inside a thread and comments from someone still waiting on our last private message
+        are only recorded. The claim is on disk before the model or Meta is called, so a webhook
+        retry or a restart never sends twice. A refusal from Meta (comment older than 7 days, already
+        answered privately, permission) is recorded as "failed" and not retried."""
+        cid = com["comment_id"]
+        who = str(com.get("from_id") or "")
+        log_meta = {**meta, "log_only": True}
+        if com.get("root_id") != cid:
+            await self.answer_fn(text, log_meta, None)
+            return
+        global _PRIVATE_LOCK
+        if _PRIVATE_LOCK is None:
+            _PRIVATE_LOCK = asyncio.Lock()
+        async with _PRIVATE_LOCK:
+            why = private_claim(self.page_id, cid, who)
+        if why:
+            if why == "waiting":
+                await self.answer_fn(text, log_meta, None)
+            return
+        pmeta = {**meta, "ghi_chu_dau": private_note(post), "private_reply": True}
+        try:
+            reply = await self.answer_fn(text, pmeta, None)
+        except Exception as e:
+            private_finish(self.page_id, cid, who, {"status": "failed", "error": f"{type(e).__name__}: {e}"})
+            print(f"[messenger private] answer failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return
+        silent = False
+        if isinstance(reply, dict):
+            silent = bool(reply.get("im_lang"))
+            reply = reply.get("text") or ""
+        reply = str(reply or "").strip()
+        if silent or not reply:
+            private_finish(self.page_id, cid, who, {"status": "skipped", "reason": "empty"})
+            return
+        try:
+            r = await self.private_reply(cid, reply)
+        except Exception as e:
+            r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if r.get("ok"):
+            private_finish(self.page_id, cid, who, {"status": "sent", "message_id": r.get("message_id", ""),
+                                                   "recipient_id": r.get("recipient_id", "")})
+        else:
+            private_finish(self.page_id, cid, who, {"status": "failed", "error": str(r.get("error") or ""),
+                                                   "code": r.get("code")})
+            print(f"[messenger private] {cid}: {r.get('error')}", file=sys.stderr)
 
     # ---- One turn ---------------------------------------------------------------------
     async def _keep_typing(self, client, chat):

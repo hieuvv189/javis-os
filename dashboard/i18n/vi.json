@@ -6330,6 +6330,7 @@
   "msc.cmt_saved": "Đã lưu cách xử lý bình luận.",
   "msc.cmt_reply": "Bot tự trả lời công khai",
   "msc.cmt_inbox": "Hiện ở Hộp thư, bạn trả lời",
+  "msc.cmt_private": "Bot nhắn riêng một tin cho người bình luận (Facebook)",
   "msc.cmt_off": "Tắt, không nhận bình luận",
   "msc.cmt_how": "Mỗi bình luận gốc dưới bài viết thành một hội thoại trong Hộp thư, các trả lời bên dưới gom chung vào đó. Trả lời từ Javis hiện công khai ngay dưới bình luận gốc. Cần quyền pages_read_user_content và pages_manage_engagement (nút Đăng nhập Facebook tự xin).",
   "msc.cmt_label": "Bình luận Fanpage",
